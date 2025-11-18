@@ -95,19 +95,58 @@ async def download_files(request: DownloadRequest):
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        # Charger la clé privée
+        # Charger la clé privée avec une meilleure compatibilité
+        key_errors = []
+        private_key = None
+        
         try:
-            private_key_file = io.StringIO(request.connection.private_key)
-            private_key = paramiko.RSAKey.from_private_key(private_key_file)
-        except Exception as e:
+            from cryptography.hazmat.primitives import serialization as crypto_serialization
+            from cryptography.hazmat.primitives.asymmetric import ed25519, dsa, rsa, ec
+            
+            # Charger la clé avec cryptography (supporte mieux les formats modernes)
+            file_bytes = request.connection.private_key.encode('utf-8')
             try:
-                # Essayer avec Ed25519
-                private_key_file = io.StringIO(request.connection.private_key)
-                private_key = paramiko.Ed25519Key.from_private_key(private_key_file)
-            except Exception:
-                # Essayer avec ECDSA
-                private_key_file = io.StringIO(request.connection.private_key)
-                private_key = paramiko.ECDSAKey.from_private_key(private_key_file)
+                key = crypto_serialization.load_ssh_private_key(
+                    file_bytes,
+                    password=None,
+                )
+            except ValueError:
+                key = crypto_serialization.load_pem_private_key(
+                    file_bytes,
+                    password=None,
+                )
+            
+            # Convertir au format PEM OpenSSH que paramiko peut lire
+            pem_key = key.private_bytes(
+                crypto_serialization.Encoding.PEM,
+                crypto_serialization.PrivateFormat.OpenSSH,
+                crypto_serialization.NoEncryption(),
+            ).decode('utf-8')
+            
+            # Charger avec paramiko selon le type de clé
+            key_file = io.StringIO(pem_key)
+            
+            if isinstance(key, rsa.RSAPrivateKey):
+                private_key = paramiko.RSAKey.from_private_key(key_file)
+                logger.info("Clé RSA chargée avec succès")
+            elif isinstance(key, ed25519.Ed25519PrivateKey):
+                private_key = paramiko.Ed25519Key.from_private_key(key_file)
+                logger.info("Clé Ed25519 chargée avec succès")
+            elif isinstance(key, ec.EllipticCurvePrivateKey):
+                private_key = paramiko.ECDSAKey.from_private_key(key_file)
+                logger.info("Clé ECDSA chargée avec succès")
+            elif isinstance(key, dsa.DSAPrivateKey):
+                private_key = paramiko.DSSKey.from_private_key(key_file)
+                logger.info("Clé DSA chargée avec succès")
+            else:
+                raise ValueError(f"Type de clé non supporté: {type(key)}")
+                
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de la clé: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Impossible de charger la clé privée: {str(e)}"
+            )
         
         # Connexion SSH
         ssh_client.connect(
