@@ -148,24 +148,30 @@ async def download_files(request: DownloadRequest):
                 detail=f"Impossible de charger la clé privée: {str(e)}"
             )
         
-        # Connexion SSH
+        # Connexion SSH avec timeouts augmentés
+        logger.info("Tentative de connexion SSH...")
         ssh_client.connect(
             hostname=request.connection.hostname,
             port=request.connection.port,
             username=request.connection.username,
             pkey=private_key,
-            timeout=30,
-            auth_timeout=30
+            timeout=120,  # Augmenté à 2 minutes
+            auth_timeout=60,  # Augmenté à 1 minute
+            banner_timeout=60
         )
+        logger.info("Connexion SSH établie avec succès")
         
-        # Ouvrir la connexion SFTP
+        # Ouvrir la connexion SFTP avec timeout
+        logger.info("Ouverture de la session SFTP...")
         sftp_client = ssh_client.open_sftp()
+        sftp_client.get_channel().settimeout(180.0)  # Timeout de 3 minutes pour les opérations SFTP
         logger.info(f"Connexion SFTP établie. Accès au répertoire: {request.remote_path}")
         
         # Lister les fichiers disponibles
         try:
+            logger.info(f"Listage des fichiers dans {request.remote_path}...")
             available_files = sftp_client.listdir(request.remote_path)
-            logger.info(f"Fichiers disponibles: {available_files}")
+            logger.info(f"Fichiers disponibles ({len(available_files)}): {available_files[:10]}...")  # Limiter l'affichage
         except Exception as e:
             raise HTTPException(
                 status_code=400,
@@ -189,9 +195,19 @@ async def download_files(request: DownloadRequest):
                 remote_file_path = f"{request.remote_path}/{filename}"
                 file_data = io.BytesIO()
                 
-                logger.info(f"Téléchargement de {filename}...")
+                download_start = datetime.utcnow()
+                logger.info(f"Début téléchargement: {filename}")
+                
+                # Vérifier la taille du fichier d'abord
+                file_attrs = sftp_client.stat(remote_file_path)
+                file_size_mb = file_attrs.st_size / (1024 * 1024)
+                logger.info(f"Taille du fichier {filename}: {file_size_mb:.2f} MB")
+                
                 sftp_client.getfo(remote_file_path, file_data)
                 file_data.seek(0)
+                
+                download_duration = (datetime.utcnow() - download_start).total_seconds()
+                logger.info(f"Téléchargement terminé en {download_duration:.2f}s")
                 
                 # Encoder en base64
                 file_content = file_data.read()
