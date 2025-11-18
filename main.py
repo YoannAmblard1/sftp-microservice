@@ -12,6 +12,18 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Custom log handler to capture logs
+class LogCapture:
+    def __init__(self):
+        self.logs = []
+    
+    def add(self, message: str):
+        self.logs.append(f"[{datetime.utcnow().strftime('%H:%M:%S')}] {message}")
+        logger.info(message)
+    
+    def get_logs(self) -> List[str]:
+        return self.logs
+
 app = FastAPI(
     title="SFTP Microservice",
     description="Microservice pour connexion SFTP avec authentification par clé SSH",
@@ -60,6 +72,7 @@ class DownloadResponse(BaseModel):
     downloaded_files: List[DownloadedFile]
     missing_files: List[str]
     stats: dict
+    logs: List[str] = []
 
 @app.get("/health")
 async def health_check():
@@ -87,9 +100,10 @@ async def download_files(request: DownloadRequest):
     downloaded_files = []
     missing_files = []
     start_time = datetime.utcnow()
+    log_capture = LogCapture()
     
     try:
-        logger.info(f"Connexion SFTP à {request.connection.hostname}:{request.connection.port}")
+        log_capture.add(f"🚀 Démarrage de la connexion SFTP vers {request.connection.hostname}:{request.connection.port}")
         
         # Créer le client SSH
         ssh_client = paramiko.SSHClient()
@@ -128,28 +142,29 @@ async def download_files(request: DownloadRequest):
             
             if isinstance(key, rsa.RSAPrivateKey):
                 private_key = paramiko.RSAKey.from_private_key(key_file)
-                logger.info("Clé RSA chargée avec succès")
+                log_capture.add("🔑 Clé RSA chargée avec succès")
             elif isinstance(key, ed25519.Ed25519PrivateKey):
                 private_key = paramiko.Ed25519Key.from_private_key(key_file)
-                logger.info("Clé Ed25519 chargée avec succès")
+                log_capture.add("🔑 Clé Ed25519 chargée avec succès")
             elif isinstance(key, ec.EllipticCurvePrivateKey):
                 private_key = paramiko.ECDSAKey.from_private_key(key_file)
-                logger.info("Clé ECDSA chargée avec succès")
+                log_capture.add("🔑 Clé ECDSA chargée avec succès")
             elif isinstance(key, dsa.DSAPrivateKey):
                 private_key = paramiko.DSSKey.from_private_key(key_file)
-                logger.info("Clé DSA chargée avec succès")
+                log_capture.add("🔑 Clé DSA chargée avec succès")
             else:
                 raise ValueError(f"Type de clé non supporté: {type(key)}")
                 
         except Exception as e:
-            logger.error(f"Erreur lors du chargement de la clé: {str(e)}")
+            log_capture.add(f"❌ Erreur lors du chargement de la clé: {str(e)}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Impossible de charger la clé privée: {str(e)}"
             )
         
         # Connexion SSH avec timeouts augmentés
-        logger.info("Tentative de connexion SSH...")
+        log_capture.add(f"🔌 Tentative de connexion SSH vers {request.connection.hostname}:{request.connection.port}")
+        log_capture.add(f"👤 Utilisateur: {request.connection.username}")
         ssh_client.connect(
             hostname=request.connection.hostname,
             port=request.connection.port,
@@ -159,20 +174,26 @@ async def download_files(request: DownloadRequest):
             auth_timeout=60,  # Augmenté à 1 minute
             banner_timeout=60
         )
-        logger.info("Connexion SSH établie avec succès")
+        log_capture.add("✅ Connexion SSH établie avec succès")
         
         # Ouvrir la connexion SFTP avec timeout
-        logger.info("Ouverture de la session SFTP...")
+        log_capture.add("📂 Ouverture de la session SFTP...")
         sftp_client = ssh_client.open_sftp()
         sftp_client.get_channel().settimeout(180.0)  # Timeout de 3 minutes pour les opérations SFTP
-        logger.info(f"Connexion SFTP établie. Accès au répertoire: {request.remote_path}")
+        log_capture.add(f"✅ Session SFTP établie")
+        log_capture.add(f"📁 Répertoire cible: {request.remote_path}")
         
         # Lister les fichiers disponibles
         try:
-            logger.info(f"Listage des fichiers dans {request.remote_path}...")
+            log_capture.add(f"🔍 Listage des fichiers dans {request.remote_path}...")
             available_files = sftp_client.listdir(request.remote_path)
-            logger.info(f"Fichiers disponibles ({len(available_files)}): {available_files[:10]}...")  # Limiter l'affichage
+            log_capture.add(f"📋 Fichiers disponibles: {len(available_files)} fichier(s)")
+            if len(available_files) <= 10:
+                log_capture.add(f"   Fichiers: {', '.join(available_files)}")
+            else:
+                log_capture.add(f"   Premiers fichiers: {', '.join(available_files[:10])}...")
         except Exception as e:
+            log_capture.add(f"❌ Erreur lors du listage: {str(e)}")
             raise HTTPException(
                 status_code=400,
                 detail=f"Impossible d'accéder au répertoire {request.remote_path}: {str(e)}"
@@ -180,13 +201,14 @@ async def download_files(request: DownloadRequest):
         
         # Chercher et télécharger les fichiers attendus
         expected_filenames = [f.filename for f in request.expected_files]
+        log_capture.add(f"📦 Téléchargement de {len(request.expected_files)} fichier(s) attendu(s)...")
         
         for expected_file in request.expected_files:
             filename = expected_file.filename
             
             # Vérifier si le fichier existe
             if filename not in available_files:
-                logger.warning(f"Fichier manquant: {filename}")
+                log_capture.add(f"⚠️ Fichier manquant: {filename}")
                 missing_files.append(filename)
                 continue
             
@@ -196,18 +218,18 @@ async def download_files(request: DownloadRequest):
                 file_data = io.BytesIO()
                 
                 download_start = datetime.utcnow()
-                logger.info(f"Début téléchargement: {filename}")
+                log_capture.add(f"⬇️ Téléchargement: {filename}")
                 
                 # Vérifier la taille du fichier d'abord
                 file_attrs = sftp_client.stat(remote_file_path)
                 file_size_mb = file_attrs.st_size / (1024 * 1024)
-                logger.info(f"Taille du fichier {filename}: {file_size_mb:.2f} MB")
+                log_capture.add(f"   Taille: {file_size_mb:.2f} MB")
                 
                 sftp_client.getfo(remote_file_path, file_data)
                 file_data.seek(0)
                 
                 download_duration = (datetime.utcnow() - download_start).total_seconds()
-                logger.info(f"Téléchargement terminé en {download_duration:.2f}s")
+                log_capture.add(f"   ✅ Terminé en {download_duration:.2f}s")
                 
                 # Encoder en base64
                 file_content = file_data.read()
@@ -220,10 +242,10 @@ async def download_files(request: DownloadRequest):
                     download_time=datetime.utcnow().isoformat()
                 ))
                 
-                logger.info(f"✓ {filename} téléchargé ({len(file_content)} bytes)")
+                log_capture.add(f"✓ {filename} téléchargé ({len(file_content)} bytes)")
                 
             except Exception as e:
-                logger.error(f"Erreur lors du téléchargement de {filename}: {str(e)}")
+                log_capture.add(f"❌ Erreur téléchargement {filename}: {str(e)}")
                 missing_files.append(filename)
         
         # Calculer les statistiques
@@ -239,28 +261,32 @@ async def download_files(request: DownloadRequest):
             "duration_seconds": round(duration, 2)
         }
         
-        logger.info(f"Téléchargement terminé: {stats}")
+        log_capture.add(f"✅ Téléchargement terminé: {len(downloaded_files)}/{len(expected_filenames)} fichier(s)")
         
         return DownloadResponse(
             success=len(missing_files) == 0,
             downloaded_files=downloaded_files,
             missing_files=missing_files,
-            stats=stats
+            stats=stats,
+            logs=log_capture.get_logs()
         )
         
     except paramiko.AuthenticationException:
+        log_capture.add("❌ Échec d'authentification SFTP")
         logger.error("Échec d'authentification SFTP")
         raise HTTPException(
             status_code=401,
             detail="Échec d'authentification SFTP. Vérifiez les identifiants et la clé privée."
         )
     except paramiko.SSHException as e:
+        log_capture.add(f"❌ Erreur SSH: {str(e)}")
         logger.error(f"Erreur SSH: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Erreur de connexion SSH: {str(e)}"
         )
     except Exception as e:
+        log_capture.add(f"❌ Erreur inattendue: {str(e)}")
         logger.error(f"Erreur inattendue: {str(e)}")
         raise HTTPException(
             status_code=500,
